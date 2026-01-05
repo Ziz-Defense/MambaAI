@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.env
+
+# Data & Logs
+*.wav
+*.csv
+*.json
+*.pt
+*.pth
+*.log
+*.tar
+*.zip
+Oren1_complete/
+Oren2_complete/
+oren1_reference_library/
+manifest.csv
+
+# Modal / Credentials
+.modal.toml
+secrets.toml
