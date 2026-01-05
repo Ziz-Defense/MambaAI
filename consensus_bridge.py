@@ -10,6 +10,7 @@ VOLUME_NAME = "oren-sim-data"
 CHECKPOINT_NAME = "latest_model.pth"
 SYNC_FILE_NAME = "consensus_sync.pth"
 TEMP_DIR = "consensus_temp"
+ARCHIVE_DIR = "Local_Checkpoints"
 POLL_INTERVAL = 300 # 5 Minutes
 
 def get_best_mae(profile):
@@ -35,6 +36,7 @@ def get_best_mae(profile):
 
 def run_bridge():
     os.makedirs(TEMP_DIR, exist_ok=True)
+    os.makedirs(ARCHIVE_DIR, exist_ok=True)
     best_overall_mae = 999.9
     leader_profile = None
     
@@ -64,6 +66,13 @@ def run_bridge():
             print(f"⬇️ Downloading Checkpoint from {winner}...")
             cmd = f"modal volume get {VOLUME_NAME} {CHECKPOINT_NAME} {TEMP_DIR}/leader.pth -p {winner}"
             subprocess.run(cmd, shell=True, check=True)
+            
+            # 2b. Archive locally for User
+            import shutil
+            ts = int(time.time())
+            archive_name = f"{ARCHIVE_DIR}/best_model_mae{win_mae:.2f}_{ts}.pth"
+            shutil.copy(f"{TEMP_DIR}/leader.pth", archive_name)
+            print(f"💾 Archived to {archive_name}")
             
             # 3. Propagate to Others
             for p in PROFILES:
