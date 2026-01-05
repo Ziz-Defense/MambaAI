@@ -476,7 +476,6 @@ def main_training_loop():
     if num_gpus > 1: model = nn.DataParallel(model)
         
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     loss_fn = AngularLoss()
     
     # To avoid "Waiting for data" log spam, we just rely on tqdm
@@ -529,6 +528,15 @@ def main_training_loop():
             if batch_idx % 20 == 0:
                 avg_mae = np.mean(deg_errors[-20:])
                 pbar.set_description(f"Ep {ep} ({current_phase_name}) Loss: {loss.item():.4f} | MAE: {avg_mae:.1f}°")
+            
+            # [CONSENSUS] Intra-Epoch Save (Every 100 batches ~ 1 min)
+            if batch_idx > 0 and batch_idx % 100 == 0:
+                state = model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict()
+                torch.save(state, f"{OUTPUT_DIR}/latest_model.pth")
+                # Write current MAE status
+                cur_mae = np.mean(deg_errors[-100:])
+                with open(f"{OUTPUT_DIR}/status.json", "w") as f:
+                    json.dump({'epoch': ep, 'mae': cur_mae, 'batch': batch_idx}, f)
                 
         # End of Epoch: Update Curriculum
         epoch_loss = np.mean(losses)

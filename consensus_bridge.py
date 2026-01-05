@@ -5,13 +5,13 @@ import glob
 import re
 
 # === CONFIG ===
-PROFILES = ["sounds", "sounds2", "sounds3", "sounds4"]
+PROFILES = ["sounds", "sounds2", "sounds3", "sounds4", "shleiby"]
 VOLUME_NAME = "oren-sim-data"
 CHECKPOINT_NAME = "latest_model.pth"
 SYNC_FILE_NAME = "consensus_sync.pth"
 TEMP_DIR = "consensus_temp"
 ARCHIVE_DIR = "Local_Checkpoints"
-POLL_INTERVAL = 300 # 5 Minutes
+POLL_INTERVAL = 60 # 1 Minute
 
 def get_best_mae(profile):
     """
