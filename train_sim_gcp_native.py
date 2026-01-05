@@ -87,8 +87,9 @@ except ImportError:
 
 # GPU Audio Augmentation Pipeline
 class AudioSynthesizer:
-    def __init__(self, lib):
+    def __init__(self, lib, config=None):
         self.lib = lib
+        self.config = config if config else {}
         self.dists = sorted(list(lib.keys()))
         # pyskiacoustics runs on CPU numpy, so we need access to CPU clips or move back and forth
         # Ideally, generate on CPU (physics is fast numpy) then stack to GPU for return
@@ -96,6 +97,15 @@ class AudioSynthesizer:
     def generate_batch(self, batch_size, device='cuda'):
         batch_audio = []
         batch_vecs = [] 
+        
+        # Unpack Config (Curriculum)
+        cfg = self.config
+        min_dist = cfg.get('min_dist', 10)
+        max_dist = cfg.get('max_dist', 100)
+        wind_opts = cfg.get('wind_opts', [0, 2, 5, 8])
+        wind_probs = cfg.get('wind_probs', [0.3, 0.3, 0.3, 0.1])
+        min_el = cfg.get('min_el', 5)
+        max_el = cfg.get('max_el', 60)
         
         # CPU generation loop (Physics engine is numpy based)
         for i in range(batch_size):
@@ -105,19 +115,19 @@ class AudioSynthesizer:
             clips = self.lib[dist_key] # Torch tensor
             
             clip_idx = np.random.randint(0, len(clips))
-            # Get mono signal (use ch0 of real clip as "dry" source approximation)
-            # ideally we'd beamform it to get cleaner source, but ch0 is okay for noise texture
             sig_torch = clips[clip_idx] # [16, 24000]
             
             # Move to CPU numpy for physics
             sig_numpy = sig_torch[0].cpu().numpy()
             
             # 2. Physics Simulation (PySKIacoustics)
-            # Random 3D Position
             az = np.random.uniform(0, 360)
-            el = np.random.uniform(5, 60) # Drone overhead
-            dist = np.random.uniform(10, 100)
-            wind = np.random.choice([0, 2, 5, 8], p=[0.3, 0.3, 0.3, 0.1])
+            el = np.random.uniform(min_el, max_el) # Dynamic Elevation
+            # Continuous distance or snapped? PySKI supports continuous.
+            # But we might want to respect the clip's base distance logic? 
+            # No, pyskiacoustics generates propagation.
+            dist = np.random.uniform(min_dist, max_dist)
+            wind = np.random.choice(wind_opts, p=wind_probs)
             
             sim_audio, vec = pyskiacoustics.generate_training_sample(
                 sig_numpy, 
@@ -129,27 +139,30 @@ class AudioSynthesizer:
             )
             
             # 3. Convert back to Torch/GPU
-            # Ensure shape [16, 24000]
-            # PySKI output matches input length roughly
             sim_tensor = torch.from_numpy(sim_audio).float().to(device)
             vec_tensor = torch.from_numpy(vec).float().to(device)
-            
-            # 4. Final Augmentations (GPU)
-            # Add electrical noise? PySKI already adds sensor noise.
             
             batch_audio.append(sim_tensor)
             batch_vecs.append(vec_tensor)
             
         return torch.stack(batch_audio), torch.stack(batch_vecs)
 
-class SyntheticDataset(Dataset):
-    def __init__(self, synth, steps): self.synth = synth; self.steps = steps
-    def __len__(self): return self.steps
-    def __getitem__(self, _): return 0 # Dummy, generation happens in collate
+class AngularLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.cos = nn.CosineSimilarity(dim=1, eps=1e-6)
+    def forward(self, pred, target):
+        return 1 - self.cos(pred, target).mean()
 
-def collate_synth(batch):
-    # Ignore batch inputs, just ask Synthesizer
-    return synth.generate_batch(len(batch))
+def compute_degree_error(pred, target):
+    # pred, target: (B, 3) normalized
+    # dot product:
+    dot = (pred * target).sum(dim=1)
+    # clamp for numerical stability
+    dot = torch.clamp(dot, -1.0, 1.0)
+    # acos
+    rad = torch.acos(dot)
+    return torch.rad2deg(rad).mean().item()
 
 # === MODEL (Mamba-DOA or Simple CNN) ===
 # Using the CNN from my previous successful scripts for robustness
@@ -323,7 +336,7 @@ def main_training_loop():
             # The current AudioSynthesizer takes a lib and assumes it might be CPU or GPU
             # generate_batch converts to `device`
             
-            synth = AudioSynthesizer(self.lib_cpu) 
+            synth = AudioSynthesizer(self.lib_cpu, config=self.config) 
             
             # Persistence Buffer
             x_buffer = []
@@ -429,13 +442,33 @@ def main_training_loop():
     # In future: `torch.utils.data.ChainDataset([FileDataset(shards), LiveDataset(...)])`
     
     print("🚀 Initializing Live Streaming Dataset (Instant Start)...")
-    train_ds = LiveSyntheticDataset(OUTPUT_DIR, N_SAMPLES, lib_cpu)
     
-    # Num Workers: Crucial for generation speed.
-    # 2 workers = 2x generation speed. 
-    # Warning: Each worker loads `pyskiacoustics` (memory). A100 has 80GB VRAM but CPU RAM?
-    # Modal A100 usually has decent CPU. Let's try 4 workers.
-    loader = DataLoader(train_ds, batch_size=BATCH_SIZE, num_workers=4, persistent_workers=True)
+    # === CURRICULUM SCHEDULE ===
+    # === ADAPTIVE CURRICULUM ===
+    CURRICULUM_PHASES = {
+        'Nursery': {'min_dist': 5, 'max_dist': 30, 'wind_opts': [0], 'wind_probs': [1.0], 'min_el': 30, 'max_el': 80},
+        'Playground': {'min_dist': 10, 'max_dist': 60, 'wind_opts': [0, 2], 'wind_probs': [0.7, 0.3], 'min_el': 20, 'max_el': 80},
+        'The Wild': {'min_dist': 5, 'max_dist': 200, 'wind_opts': [0, 2, 5, 8], 'wind_probs': [0.25]*4, 'min_el': 0, 'max_el': 90}
+    }
+    
+    current_phase_name = 'Nursery'
+    running_loss_avg = 1.0
+    
+    def update_curriculum(current_loss):
+        nonlocal current_phase_name, running_loss_avg
+        # Exponential moving average
+        running_loss_avg = 0.9 * running_loss_avg + 0.1 * current_loss
+        
+        if current_phase_name == 'Nursery' and running_loss_avg < 0.15:
+            current_phase_name = 'Playground'
+            print("🚀 LEVEL UP! Graduated to 'Playground' Phase.")
+        elif current_phase_name == 'Playground' and running_loss_avg < 0.10:
+            current_phase_name = 'The Wild'
+            print("🦅 LEVEL UP! Entered 'The Wild' Phase.")
+            
+        return CURRICULUM_PHASES[current_phase_name]
+    # train_ds = LiveSyntheticDataset(OUTPUT_DIR, N_SAMPLES, lib_cpu)
+    # loader = DataLoader(train_ds, batch_size=BATCH_SIZE, num_workers=4, persistent_workers=True)
     
     # 4. Train Sim
     print(f"Starting Sim Training on {num_gpus} GPUs...")
@@ -443,15 +476,43 @@ def main_training_loop():
     if num_gpus > 1: model = nn.DataParallel(model)
         
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-    loss_fn = nn.MSELoss()
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    loss_fn = AngularLoss()
     
     # To avoid "Waiting for data" log spam, we just rely on tqdm
     print("Training Loop Started! (Waiting for first batch from workers...)")
     
     for ep in range(EPOCHS_SIM):
+        # [CONSENSUS] Check for Hot-Swap
+        CONSENSUS_FILE = f"{OUTPUT_DIR}/consensus_sync.pth"
+        if os.path.exists(CONSENSUS_FILE):
+            print(f"🔥 HOT SWAP DETECTED! Loading Consensus Model...")
+            try:
+                # Load to CPU first
+                state = torch.load(CONSENSUS_FILE, map_location='cpu')
+                if isinstance(model, nn.DataParallel): model.module.load_state_dict(state)
+                else: model.load_state_dict(state)
+                print("✅ Hot Swap Successful. We have assimilated.")
+                os.remove(CONSENSUS_FILE) # Consume it
+            except Exception as e:
+                print(f"❌ Hot Swap Failed: {e}")
+
+        # Update Curriculum Logic
+        # Or let's just use the avg loss of the *previous* epoch to decide config for *this* epoch.
+        # Initial: Nursery.
+        
+        curr_config = CURRICULUM_PHASES[current_phase_name] # update_curriculum called at end of epoch
+        print(f"--- Epoch {ep} Curriculum: {current_phase_name} ---")
+        
+        # Re-Init Loader to pass new config to workers
+        train_ds = LiveSyntheticDataset(OUTPUT_DIR, N_SAMPLES, lib_cpu, config=curr_config)
+        # persistent_workers=False so workers restart with new config each epoch
+        loader = DataLoader(train_ds, batch_size=BATCH_SIZE, num_workers=4, persistent_workers=False)
+        
         losses = []
         # Tqdm total is approximate since it's streaming
-        pbar = tqdm.tqdm(loader, desc=f"Sim Epoch {ep}", total=N_SAMPLES//BATCH_SIZE)
+        deg_errors = []
+        pbar = tqdm.tqdm(loader, desc=f"Sim Epoch {ep} ({current_phase_name})", total=N_SAMPLES//BATCH_SIZE)
         
         for batch_idx, (x, y) in enumerate(pbar):
             opt.zero_grad()
@@ -461,14 +522,28 @@ def main_training_loop():
             opt.step()
             losses.append(loss.item())
             
+            # Metrics
+            deg = compute_degree_error(pred, y.cuda())
+            deg_errors.append(deg)
+            
             if batch_idx % 20 == 0:
-                pbar.set_description(f"Sim Epoch {ep} Loss: {np.mean(losses[-20:]):.4f}")
+                avg_mae = np.mean(deg_errors[-20:])
+                pbar.set_description(f"Ep {ep} ({current_phase_name}) Loss: {loss.item():.4f} | MAE: {avg_mae:.1f}°")
+                
+        # End of Epoch: Update Curriculum
+        epoch_loss = np.mean(losses)
+        update_curriculum(epoch_loss)
                 
         # SAVE CHECKPOINT (Every Epoch)
         if ep % 1 == 0: # Every epoch
             state = model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict()
             torch.save(state, f"{OUTPUT_DIR}/checkpoint_sim_epoch_{ep}.pth")
             torch.save(state, f"{OUTPUT_DIR}/latest_model.pth")
+            
+            # [CONSENSUS] Write Status
+            with open(f"{OUTPUT_DIR}/status.json", "w") as f:
+                json.dump({'epoch': ep, 'mae': update_curriculum(epoch_loss).get('dummy_mae', epoch_loss * 50)}, f) # Using Loss*50 as proxy if MAE not calc
+            
             print(f"✅ Saved checkpoint_sim_epoch_{ep}.pth")
         
     # Save Sim Model (Final)
