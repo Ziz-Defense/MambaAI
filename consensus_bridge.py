@@ -62,29 +62,32 @@ def run_bridge():
             best_overall_mae = win_mae
             leader_profile = winner
             
-            # 2. Download Leader Model
-            print(f"⬇️ Downloading Checkpoint from {winner}...")
-            cmd = f"modal volume get {VOLUME_NAME} {CHECKPOINT_NAME} {TEMP_DIR}/leader.pth -p {winner}"
-            subprocess.run(cmd, shell=True, check=True)
-            
-            # 2b. Archive locally for User
-            import shutil
-            ts = int(time.time())
-            archive_name = f"{ARCHIVE_DIR}/best_model_mae{win_mae:.2f}_{ts}.pth"
-            shutil.copy(f"{TEMP_DIR}/leader.pth", archive_name)
-            print(f"💾 Archived to {archive_name}")
-            
-            # 3. Propagate to Others
-            for p in PROFILES:
-                if p == winner: continue
+            try:
+                # 2. Download Leader Model
+                print(f"⬇️ Downloading Checkpoint from {winner}...")
+                cmd = f"modal volume get {VOLUME_NAME} {CHECKPOINT_NAME} {TEMP_DIR}/leader.pth -p {winner}"
+                subprocess.run(cmd, shell=True, check=True)
                 
-                print(f"🚀 Syncing to {p}...")
-                # Upload as tmp then rename to ensure atomic? 
-                # Modal volume put is fairly atomic for files.
-                cmd = f"modal volume put {VOLUME_NAME} {TEMP_DIR}/leader.pth {SYNC_FILE_NAME} -p {p}"
-                subprocess.run(cmd, shell=True)
+                # 2b. Archive locally for User
+                import shutil
+                ts = int(time.time())
+                archive_name = f"{ARCHIVE_DIR}/best_model_mae{win_mae:.2f}_{ts}.pth"
+                shutil.copy(f"{TEMP_DIR}/leader.pth", archive_name)
+                print(f"💾 Archived to {archive_name}")
                 
-            print("✅ Consensus Sync Complete.")
+                # 3. Propagate to Others
+                for p in PROFILES:
+                    if p == winner: continue
+                    
+                    print(f"🚀 Syncing to {p}...")
+                    # Upload as tmp then rename to ensure atomic? 
+                    # Modal volume put is fairly atomic for files.
+                    cmd = f"modal volume put {VOLUME_NAME} {TEMP_DIR}/leader.pth {SYNC_FILE_NAME} -p {p}"
+                    subprocess.run(cmd, shell=True)
+                    
+                print("✅ Consensus Sync Complete.")
+            except Exception as e:
+                print(f"❌ Sync Failed this cycle: {e}")
         else:
             print(f"💤 No leadership change. Current Best: {best_overall_mae:.2f}° ({leader_profile})")
             

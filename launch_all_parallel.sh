@@ -14,30 +14,39 @@ launch_bg() {
     ./launch_detached.sh $PROFILE a100 > "launch_${PROFILE}.log" 2>&1 &
 }
 
-# 1. Start all three concurrently
+# 1. Start all five concurrently
 launch_bg "sounds"
 launch_bg "sounds3"
 launch_bg "sounds4"
+launch_bg "sounds2"
+launch_bg "shleiby"
 
 echo "=================================================="
-echo "⚡ ALL THREE WORKSPACES ARE NOW UPLOADING PURELY IN PARALLEL."
-echo "I am monitoring the logs for all three."
+echo "⚡ ALL FIVE WORKSPACES ARE NOW UPLOADING PURELY IN PARALLEL."
+echo "I am monitoring the logs for all five."
 echo "=================================================="
 
 # Monitor logs for 'Job is running stably'
-while true; do
+MAX_TRIALS=20 # 10 minutes max
+TRIALS=0
+
+while [ $TRIALS -lt $MAX_TRIALS ]; do
     COMPLETE_COUNT=0
-    for p in sounds sounds2 ws1; do
+    for p in sounds sounds3 sounds4 sounds2 shleiby; do
         if grep -q "Job is running stably" "launch_${p}.log"; then
             ((COMPLETE_COUNT++))
         fi
     done
     
-    if [ $COMPLETE_COUNT -eq 3 ]; then
-        echo "🎉 ALL THREE WORKSPACES CONFIRMED RUNNING!"
-        break
+    if [ $COMPLETE_COUNT -eq 5 ]; then
+        echo "🎉 ALL FIVE WORKSPACES CONFIRMED RUNNING!"
+        exit 0
     fi
     
-    echo "⏳ Progress: $COMPLETE_COUNT/3 workspaces confirmed stable... (checking logs)"
+    echo "⏳ Progress: $COMPLETE_COUNT/5 workspaces confirmed stable... (Trial $((TRIALS+1))/$MAX_TRIALS)"
+    ((TRIALS++))
     sleep 30
 done
+
+echo "❌ TIMEOUT: Some jobs failed to stabilize within 10 minutes. Check launch_*.log"
+exit 1

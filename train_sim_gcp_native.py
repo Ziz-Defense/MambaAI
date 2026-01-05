@@ -296,12 +296,12 @@ def main_training_loop():
     import time
     
     class LiveSyntheticDataset(IterableDataset):
-        def __init__(self, output_dir, samples_per_epoch, lib_cpu):
+        def __init__(self, output_dir, samples_per_epoch, lib_cpu, config=None):
             self.output_dir = output_dir
             self.samples_per_epoch = samples_per_epoch
             self.lib_cpu = lib_cpu
             self.batch_size = 64 # Internal batch for generation efficiency
-            
+            self.config = config            
         def __iter__(self):
             # Worker Initialization
             worker_info = torch.utils.data.get_worker_info()
