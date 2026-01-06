@@ -5,7 +5,7 @@ import glob
 import re
 
 # === CONFIG ===
-PROFILES = ["sounds", "sounds2", "sounds3", "sounds4", "shleiby"]
+PROFILES = ["sounds", "sounds2", "sounds3", "sounds4", "shleiby", "sound"]
 VOLUME_NAME = "oren-sim-data"
 CHECKPOINT_NAME = "latest_model.pth"
 SYNC_FILE_NAME = "consensus_sync.pth"

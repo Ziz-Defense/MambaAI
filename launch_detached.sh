@@ -14,13 +14,15 @@ echo "🚀 Launching Mamba Training on Profile: $PROFILE"
 echo "🖥️  GPU: $GPU_TYPE"
 echo "=================================================="
 
-# Switch Modal Profile
-modal profile activate $PROFILE
+# ISOLATION: Set the env var for this process only
+export MODAL_PROFILE=$PROFILE
 
 # 1. Update Script GPU Config (Hack/Patch)
-# We need to ensure the script uses the requested GPU.
-# train_sim_modal_final.py defaults to T4:8.
-# If A100, we replace "T4:8" with "A100:1" (A100s are fast enough singly, or A100:2)
+# NOTE: This file modification is STILL A RACE CONDITION if multiple scripts try to edit `train_sim_modal_final.py` at once.
+# Ideally we pass GPU as an arg to the python script, but `train_sim_modal_final.py` has it hardcoded in the decorator.
+# Since all 5 jobs are A100, this race is "safe" (they all write the same thing).
+# But if we mixed T4 and A100, this would break.
+# For now, assumed all A100.
 if [ "$GPU_TYPE" == "a100" ]; then
     sed -i '' 's/gpu="T4:8"/gpu="A100:1"/g' train_sim_modal_final.py
     echo "⚡ Configuration set to A100:1"
