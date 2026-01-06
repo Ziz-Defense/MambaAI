@@ -106,6 +106,7 @@ class AudioSynthesizer:
         wind_probs = cfg.get('wind_probs', [0.3, 0.3, 0.3, 0.1])
         min_el = cfg.get('min_el', 5)
         max_el = cfg.get('max_el', 60)
+        apply_physics = cfg.get('apply_physics', True)
         
         # CPU generation loop (Physics engine is numpy based)
         for i in range(batch_size):
@@ -135,7 +136,8 @@ class AudioSynthesizer:
                 azimuth_deg=az, 
                 elevation_deg=el, 
                 distance_m=dist,
-                wind_speed_mps=wind
+                wind_speed_mps=wind,
+                apply_physics=apply_physics
             )
             
             # 3. Convert back to Torch/GPU
@@ -152,7 +154,9 @@ class AngularLoss(nn.Module):
         super().__init__()
         self.cos = nn.CosineSimilarity(dim=1, eps=1e-6)
     def forward(self, pred, target):
-        return 1 - self.cos(pred, target).mean()
+        # pred, target are (B, 3). Ensure they are normalized.
+        cos_sim = self.cos(pred, target)
+        return (1 - cos_sim.mean()) + 0.1 * torch.abs(pred.norm(dim=1) - 1).mean()
 
 def compute_degree_error(pred, target):
     # pred, target: (B, 3) normalized
@@ -220,11 +224,9 @@ class DOA_Net(nn.Module):
         # R_flat: (B*F, M, M)
         R_flat = torch.matmul(X_flat.transpose(1, 2).conj(), X_flat) / T
         
-        # NORMALIZATION FIX: Divide by trace (energy) to prevent explosion
-        # trace is sum of diagonal elements (real)
-        # R_ii are real.
-        trace = torch.diagonal(R_flat, dim1=-2, dim2=-1).sum(-1, keepdim=True).unsqueeze(-1) # (B*F, 1, 1)
-        R_flat = R_flat / (trace + 1e-6)
+        # STABLE NORMALIZATION: Use a fixed scale instead of trace
+        # This prevents energy/amplitude information from being totally discarded
+        R_flat = R_flat / 100.0 
         
         # Reshape to (B, F, M, M) -> This is our Sequence!
         R = R_flat.reshape(B, F, M, M)
@@ -307,15 +309,13 @@ def main_training_loop():
             worker_info = torch.utils.data.get_worker_info()
             if worker_info is None:
                 worker_id = 0
-                num_workers = 1
+                seed = int(time.time())
             else:
                 worker_id = worker_info.id
-                num_workers = worker_info.num_workers
+                seed = worker_info.seed # Use PyTorch's managed worker seed
             
-            # Unique Seed per Worker
-            seed = int(time.time()) + worker_id
-            np.random.seed(seed)
-            torch.manual_seed(seed)
+            np.random.seed(seed % (2**32))
+            torch.manual_seed(seed % (2**32))
             
             print(f"[Worker {worker_id}] Initializing AudioSynthesizer...")
             
@@ -446,9 +446,9 @@ def main_training_loop():
     # === CURRICULUM SCHEDULE ===
     # === ADAPTIVE CURRICULUM ===
     CURRICULUM_PHASES = {
-        'Nursery': {'min_dist': 5, 'max_dist': 30, 'wind_opts': [0], 'wind_probs': [1.0], 'min_el': 30, 'max_el': 80},
-        'Playground': {'min_dist': 10, 'max_dist': 60, 'wind_opts': [0, 2], 'wind_probs': [0.7, 0.3], 'min_el': 20, 'max_el': 80},
-        'The Wild': {'min_dist': 5, 'max_dist': 200, 'wind_opts': [0, 2, 5, 8], 'wind_probs': [0.25]*4, 'min_el': 0, 'max_el': 90}
+        'Nursery': {'min_dist': 5, 'max_dist': 30, 'wind_opts': [0], 'wind_probs': [1.0], 'min_el': 10, 'max_el': 30, 'apply_physics': False},
+        'Playground': {'min_dist': 10, 'max_dist': 60, 'wind_opts': [0, 2], 'wind_probs': [0.7, 0.3], 'min_el': 20, 'max_el': 80, 'apply_physics': True},
+        'The Wild': {'min_dist': 5, 'max_dist': 200, 'wind_opts': [0, 2, 5, 8], 'wind_probs': [0.25]*4, 'min_el': 0, 'max_el': 90, 'apply_physics': True}
     }
     
     current_phase_name = 'Nursery'

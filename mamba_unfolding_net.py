@@ -22,6 +22,8 @@ class MambaBlock(nn.Module):
         )
         self.x_proj = nn.Linear(self.d_inner, self.dt_rank + self.d_state * 2, bias=False)
         self.dt_proj = nn.Linear(self.dt_rank, self.d_inner, bias=True)
+        # Better dt initialization for gradient flow
+        nn.init.constant_(self.dt_proj.bias, -3.0) 
 
         A = repeat(
             torch.arange(1, self.d_state + 1, dtype=torch.float32), 
@@ -36,44 +38,48 @@ class MambaBlock(nn.Module):
         # u: (Batch, SeqLen, Dim)
         batch, seq_len, d_model = u.shape
         
+        # 1. Forward Scan
         x_and_z = self.in_proj(u)
         x_and_z = rearrange(x_and_z, "b l d -> b d l")
         x, z = x_and_z.chunk(2, dim=1)
-
-        # Conv1d processing
         x_conv = self.conv1d(x)[:, :, :seq_len]
         x_conv = F.silu(x_conv)
-
-        # SSM Parameters
         x_ssm_in = rearrange(x_conv, "b d l -> b l d")
-        x_dbl = self.x_proj(x_ssm_in)
-        dt, B, C = torch.split(x_dbl, [self.dt_rank, self.d_state, self.d_state], dim=-1)
-        dt = F.softplus(self.dt_proj(dt))
-
-        A = -torch.exp(self.A_log.float())
-        h = torch.zeros(batch, self.d_inner, self.d_state, device=u.device)
         
-        y_ssm = []
-        # Sequential scan (can be parallelized with associative scan in advanced versions)
-        for t in range(seq_len):
-            dt_t = dt[:, t, :].unsqueeze(-1) # (B, D, 1)
-            dA = torch.exp(A * dt_t)         # (B, D, N)
-            dB = dt_t * B[:, t, :].unsqueeze(1) # (B, D, N)
-            
-            x_t = x_ssm_in[:, t, :].unsqueeze(-1) # (B, D, 1)
-            
-            h = dA * h + dB * x_t # State Update: h_t = A*h_{t-1} + B*x_t
-            
-            # Output projection: y_t = C*h_t
-            y_t = torch.sum(h * C[:, t, :].unsqueeze(1), dim=-1)
-            y_ssm.append(y_t)
-
-        y_ssm = torch.stack(y_ssm, dim=1)
+        y_fwd = self.scan(x_ssm_in, batch, seq_len)
+        
+        # 2. Backward Scan (Bi-Mamba for Frequency domain)
+        # This fixes Issue #10: Frequency bins are not causal.
+        x_rev = x_ssm_in.flip(dims=[1])
+        y_rev = self.scan(x_rev, batch, seq_len)
+        y_rev = y_rev.flip(dims=[1])
+        
+        # Combine
+        y_ssm = y_fwd + y_rev
         y_ssm = y_ssm + x_ssm_in * self.D.unsqueeze(0)
         
         # Gate and Output
         out = y_ssm * F.silu(rearrange(z, "b d l -> b l d"))
         return self.out_proj(out)
+
+    def scan(self, x_ssm_in, batch, seq_len):
+        x_dbl = self.x_proj(x_ssm_in)
+        dt, B, C = torch.split(x_dbl, [self.dt_rank, self.d_state, self.d_state], dim=-1)
+        dt = F.softplus(self.dt_proj(dt))
+
+        A = -torch.exp(self.A_log.float())
+        h = torch.zeros(batch, self.d_inner, self.d_state, device=x_ssm_in.device)
+        
+        y_list = []
+        for t in range(seq_len):
+            dt_t = dt[:, t, :].unsqueeze(-1)
+            dA = torch.exp(A * dt_t)
+            dB = dt_t * B[:, t, :].unsqueeze(1)
+            x_t = x_ssm_in[:, t, :].unsqueeze(-1)
+            h = dA * h + dB * x_t
+            y_t = torch.sum(h * C[:, t, :].unsqueeze(1), dim=-1)
+            y_list.append(y_t)
+        return torch.stack(y_list, dim=1)
 
 # --- 2. DEEP UNFOLDING / ADMM HEAD (The "Physics Engine") ---
 class ADMMUnfoldingLayer(nn.Module):

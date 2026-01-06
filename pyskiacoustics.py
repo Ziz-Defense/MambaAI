@@ -508,7 +508,7 @@ def simulate_array_response(source_signal, fs, source_position,
 
 def generate_training_sample(reference_clip, fs, 
                              azimuth_deg=None, elevation_deg=None, distance_m=None,
-                             wind_speed_mps=None):
+                             wind_speed_mps=None, apply_physics=True):
     """
     Convenience function to generate a single training sample.
     
@@ -543,7 +543,8 @@ def generate_training_sample(reference_clip, fs,
         reference_clip[:, 0] if reference_clip.ndim > 1 else reference_clip,
         fs,
         source_position,
-        wind_speed_mps=wind_speed_mps
+        wind_speed_mps=wind_speed_mps,
+        apply_physics=apply_physics
     )
     
     return audio, label
