@@ -309,10 +309,10 @@ def main_training_loop():
             worker_info = torch.utils.data.get_worker_info()
             if worker_info is None:
                 worker_id = 0
-                seed = int(time.time())
+                num_workers = 1; seed = int(time.time())
             else:
                 worker_id = worker_info.id
-                seed = worker_info.seed # Use PyTorch's managed worker seed
+                num_workers = worker_info.num_workers; seed = worker_info.seed # Use PyTorch's managed worker seed
             
             np.random.seed(seed % (2**32))
             torch.manual_seed(seed % (2**32))
@@ -342,11 +342,6 @@ def main_training_loop():
             x_buffer = []
             y_buffer = []
             buffer_limit = 50 # Save every 50 samples (Quick Feedback)
-            
-            # Seed for logging
-            seed = int(time.time()) + worker_id
-            np.random.seed(seed) # Ensure worker randomness
-            torch.manual_seed(seed)
             
             count = 0
             while count < self.samples_per_epoch // num_workers:
